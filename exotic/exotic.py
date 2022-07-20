@@ -95,6 +95,14 @@ from skimage.transform import SimilarityTransform
 # error handling for scraper
 from tenacity import retry, stop_after_delay
 
+from scipy.spatial import Delaunay
+from skimage.measure import ransac
+from skimage.transform import SimilarityTransform
+import sep
+from scipy.spatial import distance
+import requests
+import pandas as pd
+
 # ########## EXOTIC imports ##########
 try:  # light curve numerics
     from .api.elca import lc_fitter, binner, transit, get_phase
@@ -124,6 +132,10 @@ try:  # output files
     from output_files import OutputFiles
 except ImportError:  # package import
     from .output_files import OutputFiles
+try: 
+    from VSPoutput_files import VSPOutputFiles
+except ImportError:
+    from .VSPoutput_files import VSPOutputFiles
 try:  # plots
     from plots import plot_fov, plot_centroids, plot_obs_stats, plot_final_lightcurve, plot_flux
 except ImportError:  # package import
@@ -136,6 +148,7 @@ try:  # simple version
     from .version import __version__
 except ImportError:  # package import
     from version import __version__
+import json
 
 animate_toggle()  # CLOSE PRELOAD ANIMATION
 # -- IMPORTS END --------------------------------------------------------------
@@ -482,6 +495,7 @@ class LimbDarkening:
         self.wl_max = wl_max
         self.fwhm = fwhm
         self.ld0 = self.ld1 = self.ld2 = self.ld3 = None
+        self.filter_desc = None
 
     def nonlinear_ld(self):
         if self.filter_type and not (self.wl_min or self.wl_max):
@@ -501,7 +515,7 @@ class LimbDarkening:
                     self._custom()
             else:
                 self._user_entered()
-        return self.ld0, self.ld1, self.ld2, self.ld3, self.filter_type, self.wl_min * 1000, self.wl_max * 1000
+        return self.ld0, self.ld1, self.ld2, self.ld3, self.filter_type, self.filter_desc, self.wl_min * 1000, self.wl_max * 1000
 
     def _standard_list(self):
         log_info("\n\n***************************")
@@ -509,19 +523,21 @@ class LimbDarkening:
         log_info("***************************")
         log_info("\nThe standard bands that are available for limb darkening parameters (https://www.aavso.org/filters)"
                  "\nas well as filters for MObs and LCO (0.4m telescope) datasets:\n")
-        for key, value in self.fwhm.items():
-            log_info(f"\t{key[1]}: {key[0]} - ({value[0]:.2f}-{value[1]:.2f}) nm")
+        for val in self.fwhm.values():
+            log_info(f"\u2022 {val['desc']}:\n\t-Abbreviation: {val['name']}"
+                     f"\n\t-FWHM: ({val['fwhm'][0]}-{val['fwhm'][1]}) nm")
 
     def _standard(self):
         while True:
             try:
                 if not self.filter_type:
                     self._standard_list()
-                    self.filter_type = user_input("\nPlease enter in the filter type (EX: Johnson V, V, STB, RJ):",
-                                                  type_=str)
-                for key, value in self.fwhm.items():
-                    if self.filter_type in (key[0], key[1]) and self.filter_type != 'N/A':
-                        self.filter_type = (key[0], key[1])
+                    self.filter_type = user_input("\nPlease enter in the Filter Name or Abbreviation "
+                                                  "(EX: Johnson V, V, STB, RJ): ", type_=str)
+                for val in self.fwhm.values():
+                    if self.filter_type.lower() in (val['desc'].lower(), val['name'].lower()) \
+                            and self.filter_type != 'N/A'.lower():
+                        self.filter_type = val['desc']
                         break
                 else:
                     raise KeyError
@@ -530,13 +546,15 @@ class LimbDarkening:
                 log_info("\nError: The entered filter is not in the provided list of standard filters.", error=True)
                 self.filter_type = None
 
-        self.wl_min = self.fwhm[self.filter_type][0]
-        self.wl_max = self.fwhm[self.filter_type][1]
-        self.filter_type = self.filter_type[1]
+        self.wl_min = float(self.fwhm[self.filter_type]['fwhm'][0])
+        self.wl_max = float(self.fwhm[self.filter_type]['fwhm'][1])
+        self.filter_desc = self.filter_type
+        self.filter_type = self.fwhm[self.filter_type]['name']
         self._calculate_ld()
 
     def _custom(self):
         self.filter_type = 'N/A'
+        self.filter_desc = 'Custom'
         if not self.wl_min:
             self.wl_min = user_input("FWHM Minimum wavelength (nm):", type_=float)
         if not self.wl_max:
@@ -544,7 +562,8 @@ class LimbDarkening:
         self._calculate_ld()
 
     def _user_entered(self):
-        self.filter_type = user_input("\nEnter in your filter name:", type_=str)
+        self.filter_type = 'N/A'
+        self.filter_desc = 'Custom'
         ld_0 = user_input("\nEnter in your first nonlinear term:", type_=float)
         ld0_unc = user_input("Enter in your first nonlinear term uncertainty:", type_=float)
         ld_1 = user_input("\nEnter in your second nonlinear term:", type_=float)
@@ -555,7 +574,7 @@ class LimbDarkening:
         ld3_unc = user_input("Enter in your fourth nonlinear term uncertainty:", type_=float)
         self.ld0, self.ld1, self.ld2, self.ld3 = (ld_0, ld0_unc), (ld_1, ld1_unc), (ld_2, ld2_unc), (ld_3, ld3_unc)
 
-        log.debug(f"Filter name: {self.filter_type}")
+        log.debug(f"Filter Abbreviation: {self.filter_type}")
         log.debug(f"User-defined nonlinear limb-darkening coefficients: {ld_0}+/-{ld0_unc}, {ld_1}+/-{ld1_unc}, "
                   f"{ld_2}+/-{ld2_unc}, {ld_3}+/-{ld3_unc}")
 
@@ -762,8 +781,54 @@ def apply_cals(image_data, gen_dark, gen_bias, gen_flat, i):
     return image_data
 
 
+def vsp_query(ra, dec, file, filter='V', img_scale=2, fov=30, maglimit=14):
+    comp_stars = {}
+    url = f"https://www.aavso.org/apps/vsp/api/chart/?format=json&ra={ra}&dec={dec}&fov={fov}&maglimit={maglimit}"
+    result = requests.get(url)
+    data = result.json()
+    chart_id = data['chartid']
+    data = pd.json_normalize(data['photometry'])
+
+    for label in data['label']:
+        star = data[data['label'] == label]
+        for bands in star['bands']:
+            for dict_ in bands:
+                if dict_['band'] == filter:
+                    # X28101
+                    ra, dec = radec_hours_to_degree(star['ra'].values[0], star['dec'].values[0])
+                    pix_ra, pix_dec = search_wcs(file).world_to_pixel_values(ra, dec)
+                    comp_stars[label] = {
+                        'xy': [int(pix_ra.min()), int(pix_dec.min())],
+                        'mag': dict_['mag'],
+                        'err': dict_['error']
+                    }
+
+    return comp_stars, chart_id
+
+
+def check_comps(comp_stars, vsx_comp_stars, imsf=10):
+    comp_stars_list = comp_stars.copy()
+
+    vsp_pix = [comp['xy'] for comp in vsx_comp_stars.values()]
+
+    for vsp_comp in vsp_pix:
+        inlist = False
+        for i, comp in enumerate(comp_stars):
+            if comp[0] - imsf <= vsp_comp[0] <= comp[0] + imsf \
+                    and comp[1] - imsf <= vsp_comp[1] <= comp[1] + imsf:
+                comp_stars_list[i] = vsp_comp
+                inlist = True
+
+        if not inlist:
+            comp_stars_list.append(vsp_comp)
+
+    return comp_stars_list, vsp_pix
+
+
 # Aligns imaging data from .fits file to easily track the host and comparison star's positions
 def transformation(image_data, file_name, roi=1):
+    pts = 30
+
     # crop image to ROI
     height = image_data.shape[1]
     width = image_data.shape[2]
@@ -774,9 +839,7 @@ def transformation(image_data, file_name, roi=1):
     try:
         results = aa.find_transform(image_data[1][roiy, roix], image_data[0][roiy, roix])
         return results[0]
-    except Exception as ee:
-        log_info(ee)
-
+    except Exception:
         ws = 5
         # smooth image and try to align again
         windows = view_as_windows(image_data[0], (ws,ws), step=1)
@@ -788,10 +851,8 @@ def transformation(image_data, file_name, roi=1):
         try:
             results = aa.find_transform(medimg1[roiy, roix], medimg[roiy, roix])
             return results[0]
-        except Exception as ee:
-            log_info(ee)
-
-        log_info(file_name)
+        except Exception:
+            pass
 
         for p in [99, 98, 95, 90]:
             for it in [2, 1, 0]:
@@ -806,10 +867,10 @@ def transformation(image_data, file_name, roi=1):
                 try:
                     results = aa.find_transform(mask1, mask0)
                     return results[0]
-                except Exception as ee:
-                    log_info(ee)
+                except Exception:
+                    pass
 
-    log_info(f"Warning: Alignment failed - {file_name}", warn=True)
+    log_info(f"Warning: Following image failed to align - {file_name}", warn=True)
     return SimilarityTransform(scale=1, rotation=0, translation=[0, 0])
 
 
@@ -935,7 +996,7 @@ def fit_centroid(data, pos, psf_function=gaussian_psf, box=15, weightedcenter=Tr
     xv, yv = mesh_box(pos, box, maxx=data.shape[1], maxy=data.shape[0])
     subarray = data[yv, xv]
     init = [np.nanmax(subarray) - np.nanmin(subarray), 1, 1, 0, np.nanmin(subarray)]
-    
+
     # compute flux weighted centroid in x and y
     wx = np.sum(xv[0]*subarray.sum(0))/subarray.sum(0).sum()
     wy = np.sum(yv[:,0]*subarray.sum(1))/subarray.sum(1).sum()
@@ -1516,8 +1577,8 @@ def main():
                                logg=pDict['logg'], loggpos=pDict['loggUncPos'], loggneg=pDict['loggUncNeg'],
                                wl_min=exotic_infoDict['wl_min'], wl_max=exotic_infoDict['wl_max'],
                                filter_type=exotic_infoDict['filter'])
-        ld0, ld1, ld2, ld3, exotic_infoDict['filter'], exotic_infoDict['wl_min'], exotic_infoDict['wl_max'] = \
-            ld_obj.nonlinear_ld()
+        ld0, ld1, ld2, ld3, exotic_infoDict['filter'], exotic_infoDict['filter_desc'], exotic_infoDict['wl_min'], \
+            exotic_infoDict['wl_max'] = ld_obj.nonlinear_ld()
         ld = [ld0[0], ld1[0], ld2[0], ld3[0]]
 
         # check for Nans + Zeros
@@ -1590,6 +1651,8 @@ def main():
             wcs_file = check_wcs(inputfiles[0], exotic_infoDict['save'], exotic_infoDict['plate_opt'])
             compStarList = exotic_infoDict['comp_stars']
             tar_radec, comp_radec = None, []
+            vsp_list = []
+            chart_id = None
 
             if wcs_file:
                 log_info(f"\nHere is the path to your plate solution: {wcs_file}")
@@ -1602,7 +1665,12 @@ def main():
                 tar_radec = (ra_file[int(exotic_UIprevTPY)][int(exotic_UIprevTPX)],
                              dec_file[int(exotic_UIprevTPY)][int(exotic_UIprevTPX)])
 
-                for compn, comp in enumerate(exotic_infoDict['comp_stars'][:]):
+                vsp_comp_stars, chart_id = vsp_query(pDict['ra'], pDict['dec'], wcs_file, filter=exotic_infoDict['filter'])
+
+
+                exotic_infoDict['comp_stars'], vsp_list = check_comps(exotic_infoDict['comp_stars'], vsp_comp_stars)
+
+                for compn, comp in enumerate(exotic_infoDict['comp_stars']):
                     ra = ra_file[int(comp[1])][int(comp[0])]
                     dec = dec_file[int(comp[1])][int(comp[0])]
                     comp_radec.append((ra, dec))
@@ -1614,8 +1682,9 @@ def main():
                         exotic_infoDict['comp_stars'].remove(comp)
                 compStarList = exotic_infoDict['comp_stars']
 
+            
             # aperture sizes in stdev (sigma) of PSF
-            apers = np.linspace(3, 6, 7)
+            apers = np.linspace(1.5, 6, 20)
             annuli = np.linspace(6, 15, 19)
 
             # alloc psf fitting param
@@ -1628,9 +1697,12 @@ def main():
                 'target_bg': np.zeros((len(inputfiles), len(apers), len(annuli)))
             }
             tar_comp_dist = {}
+            vsp_num = []
 
             for i, coord in enumerate(compStarList):
                 ckey = f"comp{i + 1}"
+                if coord in vsp_list:
+                    vsp_num.append(i)
                 psf_data[ckey] = np.zeros((len(inputfiles), 7))
                 aper_data[ckey] = np.zeros((len(inputfiles), len(apers), len(annuli)))
                 aper_data[f"{ckey}_bg"] = np.zeros((len(inputfiles), len(apers), len(annuli)))
@@ -1816,10 +1888,15 @@ def main():
 
             log_info("\nComputing best comparison star, aperture, and sky annulus. Please wait.")
 
+            ref_flux_dict = {}
+            if vsp_list:
+                ref_flux_dict = {i: None for i in vsp_num}
+
             # Aperture Photometry
             for a, aper in enumerate(apers):
                 for an, annulus in enumerate(annuli):
                     tFlux = aper_data['target'][:, a, an]
+                    ref_flux_opt = False
 
                     # fit without a comparison star
                     myfit = fit_lightcurve(times, tFlux, np.ones(tFlux.shape[0]), airmass, ld, pDict)
@@ -1837,6 +1914,7 @@ def main():
                         minAperture = -aper
                         minAnnulus = annulus
                         # arrayNormUnc = tFlux ** 0.5
+                        ref_flux_opt = True
 
                         # sets the lists we want to print to correspond to the optimal aperature
                         goodFluxes = np.copy(myfit.data)
@@ -1862,6 +1940,13 @@ def main():
                         cFlux = aper_data[ckey][:, a, an]
 
                         myfit = fit_lightcurve(times, tFlux, cFlux, airmass, ld, pDict)
+
+                        if ref_flux_opt:
+                            if j in vsp_num:
+                                ref_flux_dict[j] = {
+                                    'myfit': myfit,
+                                    'xy': compStarList[j]
+                                }
 
                         for k in myfit.bounds.keys():
                             log.debug(f"  {k}: {myfit.parameters[k]:.6f}")
@@ -2003,6 +2088,90 @@ def main():
                       exotic_infoDict['date'])
 
             log_info("\n\nOutput File Saved")
+
+            refCompDict = {}
+
+            if not bestCompStar:
+                for ckey in ref_flux_dict.keys():
+                    goodTimes = np.intersect1d(np.array(bestlmfit.time), np.array(ref_flux_dict[ckey]['myfit'].time))
+                    comp_mask = [True if i in goodTimes else False for i in ref_flux_dict[ckey]['myfit'].time]
+                    tar_mask = [True if i in goodTimes else False for i in bestlmfit.time]
+
+                    OOT = (np.array(ref_flux_dict[ckey]['myfit'].transit)[comp_mask] == 1) # possibly fix this to intersect both
+                    OOTscatter = np.std((np.array(ref_flux_dict[ckey]['myfit'].data) / np.array(ref_flux_dict[ckey]['myfit'].airmass_model))[comp_mask][OOT])
+                    goodNormUnc = OOTscatter * np.array(ref_flux_dict[ckey]['myfit'].airmass_model)[comp_mask][OOT]
+                    goodNormUnc = goodNormUnc / np.nanmedian(np.array(bestlmfit.data)[tar_mask][OOT])
+
+                    ref_norm = (np.array(ref_flux_dict[ckey]['myfit'].data))[comp_mask]
+                    tar_norm = (np.array(bestlmfit.data) / np.nanmedian(np.array(bestlmfit.data)))[tar_mask]
+
+                    refCompDict[ckey] = {
+                        'times': goodTimes,
+                        'cmask': comp_mask,
+                        'norm': ref_norm,
+                        'norm_unc': goodNormUnc,
+                        'res': tar_norm[OOT] - ref_norm[OOT],
+                        'xy': ref_flux_dict[ckey]['xy']
+                    }
+
+                    plt.plot(goodTimes[OOT], refCompDict[ckey]['res'], '.', label=f"{ref_flux_dict[ckey]['xy']}")
+
+                plt.title("Best Comparison Star")
+                plt.ylabel("Residuals (flux)")
+                plt.xlabel("Time (JD)")
+                plt.legend()
+                #plt.savefig("Best_Comp_Star.png")
+                #plt.show()
+                plt.close() #remove this pls
+                chi2Sum = {}
+
+                for key, value in refCompDict.items():
+                    expected = np.ones(len(value['norm']))
+                    chi2Sum[key] = np.sum((np.power(value['norm'] - expected, 2)) / expected)
+                chosen = None
+                min_ind = min(chi2Sum, key=chi2Sum.get)
+                comp_xy = compStarList[min_ind]
+
+                for ckey in vsp_comp_stars.keys():
+                    if comp_xy == vsp_comp_stars[ckey]['xy']:
+                        chosen = vsp_comp_stars[ckey]
+                        break
+
+                Mc = chosen['mag']
+                Mc_err = chosen['err']
+
+                for ckey in ref_flux_dict.keys():
+                    if comp_xy == ref_flux_dict[ckey]['xy']:
+                        chosen = ref_flux_dict[ckey]
+                        break
+
+                goodTimes = np.intersect1d(np.array(bestlmfit.time), np.array(chosen['myfit'].time))
+                comp_mask = [True if i in goodTimes else False for i in chosen['myfit'].time]
+                OOT = (np.array(chosen['myfit'].transit)[comp_mask] == 1)
+                F = np.array(chosen['myfit'].data)[comp_mask][OOT]
+                Mt = Mc - (2.5 * np.log10(F))
+                F_err = refCompDict[ckey]['norm_unc']
+                Mt_err = (Mc_err**2 +(-2.5*F_err/(F*np.log(10)))**2)**0.5
+                vsp_label = [key for key, value in vsp_comp_stars.items() if value['xy'] == comp_xy][0]
+                vsp_params = {
+                    'mag': Mt,
+                    'mag_err': Mt_err,
+                    'cname': vsp_label,
+                    'cmag': Mc,
+                    'chart_id': chart_id
+
+                }
+                import pdb; pdb.set_trace()
+                plt.errorbar(goodTimes[OOT], Mt, yerr=Mt_err, fmt='.', label='Target')
+                plt.title(f"Vmag: {round(np.median(Mt), 2)})")
+                plt.ylim([11.0, 11.5])
+                plt.ylabel("Vmag")
+                plt.xlabel("Time (JD)")
+                plt.legend()
+                #plt.savefig("Stellar_Variability.png")
+                #plt.show()
+                plt.close() #remove this pls
+
         else:
             goodTimes, goodFluxes, goodNormUnc, goodAirmasses = [], [], [], []
             bestCompStar, comp_coords = None, None
@@ -2033,7 +2202,7 @@ def main():
 
         # for k in myfit.bounds.keys():
         #     print(f"{myfit.parameters[k]:.6f} +- {myfit.errors[k]}")
-        
+
         if args.photometry:
             log_info("\nPhotometric Extraction Complete.")
             return
@@ -2146,6 +2315,8 @@ def main():
         fig = myfit.plot_triangle()
         fig.savefig(Path(exotic_infoDict['save']) / "temp" /
                     f"Triangle_{pDict['pName']}_{exotic_infoDict['date']}.png")
+
+        output_files = VSPOutputFiles(myfit, pDict, exotic_infoDict, durs, vsp_params)
 
         output_files = OutputFiles(myfit, pDict, exotic_infoDict, durs)
         error_txt = "\n\tPlease report this issue on the Exoplanet Watch Slack Channel in #data-reductions."
