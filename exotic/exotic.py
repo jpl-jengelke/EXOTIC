@@ -81,7 +81,7 @@ from logging.handlers import TimedRotatingFileHandler
 from matplotlib.animation import FuncAnimation
 # Pyplot imports
 import matplotlib.pyplot as plt
-# from numba import njit
+from numba import njit
 import numpy as np
 # photometry
 from photutils import CircularAperture
@@ -96,7 +96,7 @@ from skimage.util import view_as_windows
 from skimage.transform import SimilarityTransform
 # error handling for scraper
 from tenacity import retry, stop_after_delay
-
+import time
 # ########## EXOTIC imports ##########
 try:  # light curve numerics
     from .api.elca import lc_fitter, binner, transit, get_phase
@@ -243,6 +243,7 @@ def getJulianTime(header):
             exptime_offset = exp / 2. / 60. / 60. / 24.  # assume exptime is in seconds for now
 
     # If the mid-exposure time is given in the fits header, then no offset is needed to calculate the mid-exposure time
+    #import pdb; pdb.set_trace()
     return julianTime + exptime_offset
 
 
@@ -281,6 +282,7 @@ def timeConvert(timeList, timeFormat, pDict, info_dict):
 
 
 # Convert magnitude units to flux if pre-reduced file not in flux already
+@njit(fastmath=True)
 def fluxConvert(fluxList, errorList, fluxFormat):
     # If units already in flux, do nothing, perform appropriate conversions to flux otherwise
     if fluxFormat == 'magnitude':
@@ -644,7 +646,7 @@ def get_radec(header):
     x, y = np.meshgrid(xaxis, yaxis)
     return wcs_header.all_pix2world(x, y, 1)
 
-
+@njit(fastmath=True)
 def deg_to_pix(exp_ra, exp_dec, ra_list, dec_list):
     dist = (ra_list - exp_ra) ** 2 + (dec_list - exp_dec) ** 2
     return np.unravel_index(dist.argmin(), dist.shape)
@@ -851,6 +853,8 @@ def check_comps(comp_stars, vsp_comp_stars, imsf=10):
 
 # Aligns imaging data from .fits file to easily track the host and comparison star's positions
 def transformation(image_data, file_name, roi=1):
+    pts = 30
+
     # crop image to ROI
     height = image_data.shape[1]
     width = image_data.shape[2]
@@ -989,7 +993,7 @@ def find_target(target, hdufile, verbose=False):
 
     return pixcoord[0]
 
-
+@njit(cache=True)
 def gaussian_psf(x, y, x0, y0, a, sigx, sigy, rot, b):
     rx = (x - x0) * np.cos(rot) - (y - y0) * np.sin(rot)
     ry = (x - x0) * np.sin(rot) + (y - y0) * np.cos(rot)
@@ -1271,15 +1275,16 @@ def stellar_variability(ref_flux, lmfit, comp_stars, id, vsp_comp_stars, vsp_ind
 
 
 # Mid-Transit Time Prior Helper Functions
+@njit(fastmath=True)
 def numberOfTransitsAway(timeData, period, originalT):
     return int((np.nanmin(timeData) - originalT) / period) + 1
 
-
+@njit(fastmath=True)
 def nearestTransitTime(timeData, period, originalT):
     nearT = ((numberOfTransitsAway(timeData, period, originalT) * period) + originalT)
     return nearT
 
-
+@njit(cache=True)
 def save_comp_radec(wcs_file, ra_file, dec_file, comp_coords):
     comp_ra, comp_dec = None, None
 
@@ -1564,6 +1569,7 @@ def parse_args():
 
 
 def main():
+    start = time.time()
     # command line args
     args = parse_args()
 
@@ -1799,7 +1805,7 @@ def main():
             mobs_header = fits.getheader(filename=inputfiles[0], ext=0)
             if 'CREATOR' in mobs_header:
                 if 'MicroObservatory' in mobs_header['CREATOR'] and 'MOBS' not in exotic_infoDict['second_obs'].upper():
-                    if exotic_infoDict['second_obs'].upper() != "":
+                    if exotic_infoDict['second_obs'].upper() != "N/A":
                         exotic_infoDict['second_obs'] += ",MOBS"
                     else:
                         exotic_infoDict['second_obs'] = "MOBS"
@@ -2287,6 +2293,7 @@ def main():
                                                  bjd_inc, pDict, exotic_infoDict)
 
             log_info("\n\nOutput File Saved")
+            #import pdb; pdb.set_trace()
         else:
             goodTimes, goodFluxes, goodNormUnc, goodAirmasses = [], [], [], []
             bestCompStar, comp_coords = None, None
@@ -2306,7 +2313,7 @@ def main():
             goodFluxes = np.array(goodFluxes)
             goodNormUnc = np.array(goodNormUnc)
             goodAirmasses = np.array(goodAirmasses)
-
+            #import pdb; pdb.set_trace()
             if exotic_infoDict['file_time'] != 'BJD_TDB':
                 goodTimes = timeConvert(goodTimes, exotic_infoDict['file_time'], pDict, exotic_infoDict)
 
@@ -2421,6 +2428,8 @@ def main():
                 log_info(f"                     Optimal Annulus: {np.round(minAnnulus, 2)}")
         log_info(f"              Transit Duration [day]: {round_to_2(np.mean(durs), np.std(durs))} +/- {round_to_2(np.std(durs))}")
         log_info("*********************************************************")
+        end = time.time()
+        print(end - start)
 
         ##########
         # SAVE DATA
@@ -2431,7 +2440,7 @@ def main():
                     f"Triangle_{pDict['pName']}_{exotic_infoDict['date']}.png")
 
         if vsp_params:
-            VSPoutput_files = VSPOutputFiles(myfit, pDict, exotic_infoDict, durs, vsp_params)
+            VSPoutput_files = VSPOutputFiles(myfit, pDict, exotic_infoDict, durs, vsp_params) 
         output_files = OutputFiles(myfit, pDict, exotic_infoDict, durs)
         error_txt = "\n\tPlease report this issue on the Exoplanet Watch Slack Channel in #data-reductions."
 
@@ -2454,9 +2463,6 @@ def main():
             if bestCompStar:
                 exotic_infoDict['phot_comp_star'] = save_comp_radec(wcs_file, ra_file, dec_file, comp_coords)
             output_files.aavso(exotic_infoDict['phot_comp_star'], goodAirmasses, ld0, ld1, ld2, ld3)
-        except Exception as e:
-            log_info(f"\nError: Could not create AAVSO.txt. {error_txt}\n\t{e}", error=True)
-        try:
             if vsp_params:
                 VSPoutput_files.aavso(goodAirmasses)
         except Exception as e:

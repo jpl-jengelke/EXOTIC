@@ -1,6 +1,7 @@
 from json import dump, dumps
 from numpy import mean, median, std
 from pathlib import Path
+#from PyAstronomy import pyasl
 
 try:
     from utils import round_to_2
@@ -10,6 +11,10 @@ try:
     from version import __version__
 except ImportError:
     from .version import __version__
+try: 
+    from .barycorr import bjd2utc
+except ImportError:
+    from barycorr import bjd2utc
 
 
 class OutputFiles:
@@ -144,7 +149,7 @@ class VSPOutputFiles:
                     f"#OBSCODE={self.i_dict['aavso_num']}\n"  # UI
                     f"#SOFTWARE=EXOTIC v{__version__}\n"  # fixed
                     "#DELIM=,\n"  # fixed
-                    "#DATE_TYPE=BJD_TDB\n"  # fixed
+                    "#DATE_TYPE=JD\n"  # fixed
                     f"#OBSTYPE={self.i_dict['camera']}\n")
             f.write(
                 "# EXOTIC is developed by Exoplanet Watch (exoplanets.nasa.gov/exoplanet-watch/), a citizen science "
@@ -156,7 +161,11 @@ class VSPOutputFiles:
 
             f.write("#NAME,DATE,MAG,MERR,FILT,TRANS,MTYPE,CNAME,CMAG,KNAME,KMAG,AMASS,GROUP,CHART,NOTES\n")
             for vsp_p in self.vsp_params:
-                f.write(f"{self.p_dict['sName']},"f"{round(vsp_p['time'], 5)}," f"{round(vsp_p['mag'], 5)}," f"{round(vsp_p['mag_err'], 5)},"
+                if self.i_dict['file_time'] == 'BJD_TDB':
+                    jd_utc = bjd2utc(float(vsp_p['time']), float(self.p_dict['ra']), float(self.p_dict['dec']))
+                else:
+                    jd_utc = vsp_p['time']
+                f.write(f"{self.p_dict['sName']},"f"{round(jd_utc, 6)}," f"{round(vsp_p['mag'], 5)}," f"{round(vsp_p['mag_err'], 5)},"
                         "V,NO,STD," f"{vsp_p['cname']}," f"{round(vsp_p['cmag'], 5)}," "na,na," 
                         f"{round(median(airmasses[vsp_p['idx'][0]:vsp_p['idx'][1]]), 7)}," "na," 
                         f"{vsp_p['chart_id']}," "na\n")

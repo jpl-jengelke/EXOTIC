@@ -42,7 +42,7 @@
 # ########################################################################### #
 
 import copy
-# from numba import njit
+from numba import njit
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import least_squares
@@ -62,8 +62,9 @@ except:
     from .plotting import corner
 
 from pylightcurve.models.exoplanet_lc import transit as pytransit
+from numba import njit
 
-
+@njit(cache=True)
 def weightedflux(flux, gw, nearest):
     return np.sum(flux[nearest] * gw, axis=-1)
 
@@ -92,7 +93,7 @@ def transit(times, values):
                       values['tmid'], times, method='claret', precision=3)
     return model
 
-
+@njit(fastmath=True)
 def get_phase(times, per, tmid):
     return (times - tmid + 0.25 * per) / per % 1 - 0.25
 
@@ -103,7 +104,7 @@ def mc_a1(m_a2, sig_a2, transit, airmass, data, n=10000):
     detrend = data / model
     return np.mean(np.median(detrend, 0)), np.std(np.median(detrend, 0))
 
-
+@njit(cache=True)
 def round_to_2(*args):
     x = args[0]
     if len(args) == 1:
@@ -121,6 +122,7 @@ def round_to_2(*args):
 
 
 # average data into bins of dt from start to finish
+@njit(cache=True)
 def time_bin(time, flux, dt=1. / (60 * 24)):
     bins = int(np.floor((max(time) - min(time)) / dt))
     bflux = np.zeros(bins)
@@ -137,6 +139,7 @@ def time_bin(time, flux, dt=1. / (60 * 24)):
 
 
 # Function that bins an array
+@njit(cache=True)
 def binner(arr, n, err=''):
     if len(err) == 0:
         ecks = np.pad(arr.astype(float), (0, ((n - arr.size % n) % n)), mode='constant',
@@ -299,7 +302,7 @@ class lc_fitter(object):
             model *= np.median(detrend)
             return -0.5 * np.sum(((self.data - model) / self.dataerr) ** 2)
 
-        # @njit(fastmath=True)
+        @njit(fastmath=True)
         def prior_transform(upars):
             # transform unit cube to prior volume
             return boundarray[:, 0] + bounddiff * upars
@@ -618,6 +621,7 @@ class glc_fitter(lc_fitter):
         # transform unit cube to prior volume
         bounddiff = np.diff(boundarray, 1).reshape(-1)
 
+        @njit(fastmath=True)
         def prior_transform(upars):
             return boundarray[:, 0] + bounddiff * upars
 

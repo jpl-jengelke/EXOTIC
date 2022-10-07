@@ -75,7 +75,7 @@
             "Star Surface Gravity (-) Uncertainty": -0.04
     },
     "optional_info": {
-            "Pre-reduced File:": "/sample-data/NormalizedFlux_HAT-P-32 b_December 17, 2017.txt",
+            "Pre-reduced File":"",
             "Pre-reduced File Time Format (BJD_TDB, JD_UTC, MJD_UTC)": "BJD_TDB",
             "Pre-reduced File Units of Flux (flux, magnitude, millimagnitude)": "flux",
 
