@@ -36,10 +36,10 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: python-package-distribution
-        if-no-files-found: error
         path:
           '*.whl'
           '*.zip'
+        if-no-files-found: error
 
   release:
     runs-on: ubuntu-latest
