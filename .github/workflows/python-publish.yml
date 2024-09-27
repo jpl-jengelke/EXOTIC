@@ -37,8 +37,8 @@ jobs:
       with:
         name: python-package-distribution
         path:
-          - '*.whl'
-          - '*.zip'
+          '*.whl'
+          '*.zip'
         if-no-files-found: error
 
   release:
