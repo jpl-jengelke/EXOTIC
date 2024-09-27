@@ -36,9 +36,9 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: python-package-distribution
-        paths:
-          '*.whl'
-          '*.zip'
+        path:
+          - '*.whl'
+          - '*.zip'
         if-no-files-found: error
 
   release:
