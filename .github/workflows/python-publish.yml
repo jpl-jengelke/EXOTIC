@@ -35,11 +35,11 @@ jobs:
     - name: Store package
       uses: actions/upload-artifact@v4
       with:
+        if-no-files-found: error
         name: python-package-distribution
         path:
-          '*.whl'
-          '*.zip'
-        if-no-files-found: error
+          *.whl
+          *.zip
 
   release:
     runs-on: ubuntu-latest
