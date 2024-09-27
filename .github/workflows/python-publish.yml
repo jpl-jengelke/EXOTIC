@@ -53,7 +53,7 @@ jobs:
       with:
         name: python-package-distribution
         path: dist/
-    - name: Publish package (PyPi)
-      uses: pypa/gh-action-pypi-publish@release/v1
-      with:
-        repository-url: https://pypi.org/p/exotic/  # for testing sub https://test.pypi.org/legacy/
+#    - name: Publish package (PyPi)
+#      uses: pypa/gh-action-pypi-publish@release/v1
+#      with:
+#        repository-url: https://pypi.org/p/exotic/  # for testing sub https://test.pypi.org/legacy/
