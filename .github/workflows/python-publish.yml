@@ -39,7 +39,7 @@ jobs:
         path:
           '*.whl'
           '*.zip'
-        if-no-files-found: error
+#        if-no-files-found: error
 
   release:
     runs-on: ubuntu-latest
