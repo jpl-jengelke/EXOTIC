@@ -38,8 +38,8 @@ jobs:
         name: python-package-distribution
         if-no-files-found: error
         path:
-          *.whl
-          *.zip
+          '*.whl'
+          '*.zip'
 
   release:
     runs-on: ubuntu-latest
