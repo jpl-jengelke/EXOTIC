@@ -37,9 +37,9 @@ jobs:
       with:
         name: python-package-distribution
         path:
-          '*.whl'
-          '*.zip'
-#        if-no-files-found: error
+          dist/*.whl
+          dist/*.zip
+        if-no-files-found: error
 
   release:
     runs-on: ubuntu-latest
